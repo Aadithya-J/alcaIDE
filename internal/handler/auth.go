@@ -88,7 +88,7 @@ func LoginHandler(w http.ResponseWriter, r *http.Request) {
 
 	if !ComparePasswordHash(req.Password, user.Password){
 		http.Error(w, "Invalid Credentials", http.StatusUnauthorized)
-		log.Println("Incorrect Credentials",err)
+		log.Println("Incorrect Credentials")
 		return
 	}
 
