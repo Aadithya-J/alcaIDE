@@ -49,12 +49,7 @@ func main() {
 
     defer dockerManager.CleanupContainers()
 
-    containers := dockerManager.GetContainers()
-    if len(containers) == 0 {
-        log.Fatal("No containers available to serve requests.")
-    }
-
-    mux := router.Setup(containers)
+    mux := router.Setup(dockerManager)
 
     server := &http.Server{
         Addr:    SERVER_ADDR,

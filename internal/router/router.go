@@ -4,14 +4,20 @@ import (
 	"net/http"
 	"fmt"
 	"context"
-
+	"log"
 	"github.com/docker/docker/client"
-	
+
+	"github.com/Aadithya-J/alcaIDE/internal/docker"
 	"github.com/Aadithya-J/alcaIDE/internal/handler"
-	"github.com/Aadithya-J/alcaIDE/model"
 )
 
-func Setup(containers []model.ContainerInfo) http.Handler {
+func Setup(dockerManager *docker.DockerManager) http.Handler {
+
+	containers := dockerManager.GetContainers()
+    if len(containers) == 0 {
+        log.Fatal("No containers available to serve requests.")
+    }
+
 	for _, c := range containers {
 		fmt.Printf("Container ID: %s\n", c.ID)
 	}

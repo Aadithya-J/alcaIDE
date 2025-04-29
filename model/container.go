@@ -4,9 +4,10 @@ import (
 	"sync"
 	"bytes"
 	"context"
-	// "log"
+	"log"
 	"io"
 	"fmt"
+    
 	
 	"github.com/docker/docker/api/types/container"
 	// "github.com/docker/docker/api/types"
