@@ -2,13 +2,11 @@ package handler
 
 import (
 	"time"
-	"os"
 
 	"github.com/Aadithya-J/alcaIDE/model"
+	"github.com/Aadithya-J/alcaIDE/internal/config"
 	"github.com/golang-jwt/jwt/v5"
 )
-
-var jwtSecret = []byte(os.Getenv("JWT_SECRET"))
 
 func toUserResponse(user model.User) model.UserResponse {
 	return model.UserResponse{
@@ -19,6 +17,7 @@ func toUserResponse(user model.User) model.UserResponse {
 }
 
 func generateJWT(user model.User) (string, error) {
+	var jwtSecret = []byte(config.GetEnv("JWT_SECRET"))
 	claims := jwt.MapClaims{
 		"user_id":       user.ID,
 		"user_email":    user.Email,

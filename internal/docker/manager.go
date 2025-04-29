@@ -7,6 +7,7 @@ import (
     "log"
     "os"
     "sync"
+    "sync/atomic"
     "time"
 
     "github.com/Aadithya-J/alcaIDE/model"
@@ -22,12 +23,13 @@ const (
 )
 
 type DockerManager struct {
-    cli        *client.Client
-    containers []*model.ContainerInfo
-    imageName  string
-    availablePool chan *model.ContainerInfo
-    containerMap map[string]*model.ContainerInfo
+    cli               *client.Client
+    containers        []*model.ContainerInfo
+    imageName         string
+    availablePool     chan *model.ContainerInfo
+    containerMap      map[string]*model.ContainerInfo
     containerMapMutex sync.RWMutex
+    shuttingDown      atomic.Bool
 }
 
 func NewManager(imageName string) (*DockerManager, error) {
@@ -39,10 +41,11 @@ func NewManager(imageName string) (*DockerManager, error) {
         imageName = DefaultImage
     }
     return &DockerManager{
-        cli:        cli,
-        containers: []*model.ContainerInfo{},
-        imageName:  imageName,
-        containerMap:  make(map[string]*model.ContainerInfo),
+        cli:          cli,
+        containers:   []*model.ContainerInfo{},
+        imageName:    imageName,
+        containerMap: make(map[string]*model.ContainerInfo),
+        // shuttingDown defaults to false (zero value)
     }, nil
 }
 
@@ -75,16 +78,16 @@ func (m *DockerManager) StartInitialContainers(ctx context.Context, count int) e
     var startMutex sync.Mutex
     errChan := make(chan error, count)
 
-    for i:=0;i < count; i++ {
+    for i := 0; i < count; i++ {
         wg.Add(1)
-        go func(containerIndex int){
+        go func(containerIndex int) {
             defer wg.Done()
             log.Printf("Creating container %d...", containerIndex)
             resp, err := m.cli.ContainerCreate(ctx, &container.Config{
                 Image: m.imageName,
                 Cmd:   []string{"sleep", "infinity"},
-                Tty: false,
-            },nil,nil,nil,"")
+                Tty:   false,
+            }, nil, nil, nil, "")
 
             if err != nil {
                 errChan <- fmt.Errorf("failed to create container %d: %w", containerIndex, err)
@@ -136,7 +139,7 @@ func (m *DockerManager) StartInitialContainers(ctx context.Context, count int) e
         log.Printf("Warning: Some containers failed to start: %v", startupErrors)
     }
     log.Printf("%d containers started successfully.", numStarted)
-    return nil;
+    return nil
 }
 
 func (m *DockerManager) AcquireContainer(ctx context.Context) (*model.ContainerInfo, error) {
@@ -149,17 +152,25 @@ func (m *DockerManager) AcquireContainer(ctx context.Context) (*model.ContainerI
         return nil, fmt.Errorf("failed to acquire container: %w", ctx.Err())
     }
 }
+
 func (m *DockerManager) ReleaseContainer(container *model.ContainerInfo) {
     if container == nil {
         log.Println("Warning: Attempted to release a nil container.")
         return
     }
+
+    // Check if shutdown is in progress BEFORE trying to send
+    if m.shuttingDown.Load() {
+        log.Printf("Shutdown in progress. Not returning container %s to pool.", container.ID)
+        return 
+    }
+
     log.Printf("Releasing container: %s", container.ID)
     select {
     case m.availablePool <- container:
         log.Printf("Container %s returned to pool.", container.ID)
     default:
-        log.Printf("Warning: Could not return container %s to pool (pool might be full or closed).", container.ID)
+        log.Printf("Warning: Could not return container %s to pool (pool might be full).", container.ID)
     }
 }
 
@@ -173,9 +184,9 @@ func (m *DockerManager) GetContainers() []*model.ContainerInfo {
 }
 
 func (m *DockerManager) CleanupContainers() {
+    m.shuttingDown.Store(true)
     m.containerMapMutex.Lock()
     defer m.containerMapMutex.Unlock()
-
 
     if len(m.containers) == 0 {
         log.Println("No containers managed by this manager to clean up.")
@@ -192,11 +203,10 @@ func (m *DockerManager) CleanupContainers() {
     cleanupCtx, cancelCleanup := context.WithTimeout(context.Background(), cleanupTimeout)
     defer cancelCleanup()
 
-
     var wg sync.WaitGroup
     for _, c := range m.containers {
         wg.Add(1)
-        go func(c *model.ContainerInfo){
+        go func(c *model.ContainerInfo) {
             defer wg.Done()
             containerID := c.ID
             log.Printf("Stopping container %s...", containerID)
@@ -213,7 +223,7 @@ func (m *DockerManager) CleanupContainers() {
             } else {
                 log.Printf("Container %s stopped.", containerID)
             }
-            
+
             if cleanupCtx.Err() != nil {
                 log.Printf("Context cancelled before removing container %s.", containerID)
                 return // Don't attempt removal if context is done
@@ -232,7 +242,6 @@ func (m *DockerManager) CleanupContainers() {
         }(c)
     }
     wg.Wait()
-
 
     if cleanupCtx.Err() == context.DeadlineExceeded {
         log.Println("Warning: Container cleanup timed out.")

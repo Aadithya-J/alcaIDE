@@ -11,11 +11,9 @@ import (
 
 func Setup(dockerManager *docker.DockerManager) http.Handler {
 	containers := dockerManager.GetContainers()
-	for _, c := range containers {
-		fmt.Printf("Container ID: %s\n", c.ID)
-	}
-
-	ctx := context.Background()
+	// for _, c := range containers {
+	// 	fmt.Printf("Container ID: %s\n", c.ID)
+	// }
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ping", handler.PingHandler)
@@ -23,7 +21,7 @@ func Setup(dockerManager *docker.DockerManager) http.Handler {
 	mux.HandleFunc("/login", handler.LoginHandler)
 
 	mux.HandleFunc("/execPy", func(w http.ResponseWriter, r *http.Request) {
-		handler.ExecPythonHandler(w, r, ctx, dockerManager)
+		handler.ExecPythonHandler(w, r, r.Context(), dockerManager)
 	})
 	return mux
 }

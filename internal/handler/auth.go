@@ -2,7 +2,6 @@ package handler
 
 import (
 	"log"
-	"context"
 	"encoding/json"
 	"net/http"
 
@@ -34,7 +33,7 @@ func RegisterHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_, err = db.Conn.Exec(context.Background(),
+	_, err = db.Conn.Exec(r.Context(),
 		"INSERT INTO USERS (id, username, email, password) VALUES ($1, $2, $3, $4)",
 		user.ID, user.Username, user.Email, user.Password,
 	)
@@ -73,7 +72,7 @@ func LoginHandler(w http.ResponseWriter, r *http.Request) {
 
 	var user model.User
 
-	err = db.Conn.QueryRow(context.Background(),
+	err = db.Conn.QueryRow(r.Context(),
 		"SELECT id, username, email, password FROM users WHERE username = $1",
 		req.Username,
 	).Scan(&user.ID,&user.Username,&user.Email,&user.Password)

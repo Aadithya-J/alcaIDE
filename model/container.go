@@ -36,10 +36,24 @@ func (c *ContainerInfo) ExecutePython(code string, cli *client.Client, ctx conte
 	defer attachResp.Close()
 
 	var stdoutBuf, stderrBuf bytes.Buffer
+	copyErr := make(chan error, 1)
+	go func() {
+		_, err := stdcopy.StdCopy(&stdoutBuf, &stderrBuf, attachResp.Reader)
+		if err != nil && err != io.EOF {
+			copyErr <- err
+		} else {
+			copyErr <- nil
+		}
+	}()
 
-	_, err = stdcopy.StdCopy(&stdoutBuf, &stderrBuf, attachResp.Reader)
-	if err != nil && err != io.EOF {
-		log.Printf("warning: output copy might be incomplete: %v", err)
+	select {
+	case <-ctx.Done():
+		attachResp.Close()
+		return "", fmt.Errorf("python execution timed out: %w", ctx.Err())
+	case err := <-copyErr:
+		if err != nil {
+			log.Printf("warning: stdcopy incomplete: %v", err)
+		}
 	}
 
 	inspectResp, err := cli.ContainerExecInspect(ctx, execResp.ID)
@@ -47,25 +61,20 @@ func (c *ContainerInfo) ExecutePython(code string, cli *client.Client, ctx conte
 		log.Printf("warning: exec inspect failed: %v", err)
 	}
 
-	output := stdoutBuf.String()
-	stderrStr := stderrBuf.String()
-
+	outStr := stdoutBuf.String()
+	errStr := stderrBuf.String()
 	if inspectResp.ExitCode != 0 {
-		combinedOutput := output
-		if stderrStr != "" {
-			if combinedOutput != "" {
-				combinedOutput += "\n"
+		combined := outStr
+		if errStr != "" {
+			if combined != "" {
+				combined += "\n"
 			}
-			combinedOutput += "Stderr:\n" + stderrStr
+			combined += "Stderr:\n" + errStr
 		}
-		return output, fmt.Errorf(
-			"python execution failed (exit code %d):\n%s",
-			inspectResp.ExitCode,
-			combinedOutput,
-		)
-	} else if stderrStr != "" {
-		log.Printf("Python execution produced stderr (exit code 0) in container %s:\n%s", c.ID, stderrStr)
+		return outStr, fmt.Errorf("python execution failed (exit %d):\n%s", inspectResp.ExitCode, combined)
 	}
-
-	return output, nil
+	if errStr != "" {
+		log.Printf("python stderr (exit 0) in %s:\n%s", c.ID, errStr)
+	}
+	return outStr, nil
 }

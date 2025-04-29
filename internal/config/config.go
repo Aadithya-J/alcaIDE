@@ -10,7 +10,16 @@ import (
 func LoadEnv() {
     err := godotenv.Load()
     if err != nil {
-        log.Println("Error loading .env file")
+        log.Fatal("Error loading .env file")
+    }
+    dbURL := os.Getenv("DATABASE_URL")
+    if dbURL == "" {
+        log.Fatal("DATABASE_URL not set in .env file")
+    }
+
+    jwtSecret := os.Getenv("JWT_SECRET")
+    if jwtSecret == "" {
+        log.Fatal("JWT_SECRET not set in .env file")
     }
 }
 

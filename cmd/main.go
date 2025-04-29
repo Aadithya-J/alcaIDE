@@ -17,7 +17,7 @@ import (
 )
 
 const (
-    INITIAL_CONTAINER_COUNT = 3
+    INITIAL_CONTAINER_COUNT = 2
     SERVER_SHUTDOWN_TIMEOUT = 5 * time.Second
     SERVER_ADDR             = ":8080"
     DOCKER_IMAGE            = "docker.io/library/python:3.11-slim"
