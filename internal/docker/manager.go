@@ -152,3 +152,7 @@ func (m *DockerManager) Close() {
         log.Println("Docker client closed successfully.")
     }
 }
+
+func (m *DockerManager) GetClient() *client.Client {
+    return m.cli
+}

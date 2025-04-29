@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"context"
 	"log"
-	"github.com/docker/docker/client"
 
 	"github.com/Aadithya-J/alcaIDE/internal/docker"
 	"github.com/Aadithya-J/alcaIDE/internal/handler"
@@ -23,7 +22,7 @@ func Setup(dockerManager *docker.DockerManager) http.Handler {
 	}
 
 	ctx := context.Background()
-	cli, _ := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
+	cli := dockerManager.GetClient()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ping", handler.PingHandler)
