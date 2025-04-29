@@ -3,7 +3,6 @@ package handler
 import (
 	"log"
 	"context"
-	"time"
 	"encoding/json"
 	"net/http"
 
@@ -11,7 +10,6 @@ import (
 	"github.com/Aadithya-J/alcaIDE/model"
 
 	"github.com/google/uuid"
-	"github.com/golang-jwt/jwt/v5"
 )
 
 
@@ -92,15 +90,7 @@ func LoginHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	claims := jwt.MapClaims{
-        "user_id": user.ID,
-		"user_email" : user.Email,
-		"user_username" : user.Username,
-        "exp":     time.Now().Add(time.Hour * 72).Unix(),
-    }
-
-	t := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	token, err := t.SignedString(jwtSecret)
+	token, err := generateJWT(user)
 
 	if err != nil {
 		log.Println("Error Signing jwt.")

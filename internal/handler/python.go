@@ -2,24 +2,25 @@ package handler
 
 import (
 	"context"
-
 	"net/http"
 	"encoding/json"
 
+	"github.com/Aadithya-J/alcaIDE/internal/docker"
 	"github.com/Aadithya-J/alcaIDE/model"
-	"github.com/docker/docker/client"
 )
 
 
-func ExecPythonHandler(w http.ResponseWriter, r* http.Request, cli *client.Client, ctx context.Context, containers []model.ContainerInfo) {
+func ExecPythonHandler(w http.ResponseWriter, r* http.Request, ctx context.Context, dockerManager *docker.DockerManager) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-
+	containers := dockerManager.GetContainers()
 	var requestData struct {
 		Code string `json:"code"`
 	}
+
+	cli := dockerManager.GetClient()
 
 	err := json.NewDecoder(r.Body).Decode(&requestData);
 	if err != nil {
