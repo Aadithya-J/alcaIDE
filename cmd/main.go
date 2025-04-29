@@ -23,6 +23,12 @@ const (
     DOCKER_IMAGE            = "docker.io/library/python:3.11-slim"
 )
 
+var languageImages = map[string]string{
+    "python":     "docker.io/library/python:3.11-slim",
+    "javascript": "docker.io/library/node:20-slim",
+    // Add other languages and their corresponding images here
+}
+
 func main() {
     config.LoadEnv()
 
@@ -32,14 +38,14 @@ func main() {
         db.Close()
     }()
 
-    dockerManager, err := docker.NewManager(DOCKER_IMAGE)
+    dockerManager, err := docker.NewManager(languageImages)
     if err != nil {
         log.Fatalf("Failed to create Docker manager: %v", err)
     }
     defer dockerManager.Close()
 
     ctx := context.Background()
-    if err := dockerManager.PullImage(ctx); err != nil {
+    if err := dockerManager.PullImages(ctx); err != nil {
         log.Printf("Warning: Failed to pull Docker image: %v. Proceeding might use a local image.", err)
     }
 

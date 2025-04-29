@@ -16,13 +16,13 @@ type ContainerInfo struct {
 	ID string
 }
 
-func (c *ContainerInfo) ExecutePython(code string, cli *client.Client, ctx context.Context) (string, error) {
+func (c *ContainerInfo) ExecuteCode(execCmd []string, cli *client.Client, ctx context.Context) (string, error) {
 	execConfig := container.ExecOptions{
-		Cmd:          []string{"python", "-c", code},
+		Cmd:          execCmd,
 		AttachStdout: true,
 		AttachStderr: true,
 	}
-	fmt.Println("Executing Python code in container:", c.ID)
+	fmt.Println("Executing code in container:", c.ID)
 
 	execResp, err := cli.ContainerExecCreate(ctx, c.ID, execConfig)
 	if err != nil {

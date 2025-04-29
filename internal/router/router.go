@@ -2,15 +2,13 @@ package router
 
 import (
 	"net/http"
-	"fmt"
-	"context"
 
 	"github.com/Aadithya-J/alcaIDE/internal/docker"
 	"github.com/Aadithya-J/alcaIDE/internal/handler"
 )
 
 func Setup(dockerManager *docker.DockerManager) http.Handler {
-	containers := dockerManager.GetContainers()
+	// containers := dockerManager.GetContainers()
 	// for _, c := range containers {
 	// 	fmt.Printf("Container ID: %s\n", c.ID)
 	// }
@@ -20,8 +18,8 @@ func Setup(dockerManager *docker.DockerManager) http.Handler {
 	mux.HandleFunc("/register", handler.RegisterHandler)
 	mux.HandleFunc("/login", handler.LoginHandler)
 
-	mux.HandleFunc("/execPy", func(w http.ResponseWriter, r *http.Request) {
-		handler.ExecPythonHandler(w, r, r.Context(), dockerManager)
+	mux.HandleFunc("/exec", func(w http.ResponseWriter, r *http.Request) {
+		handler.ExecCodeHandler(w, r, r.Context(), dockerManager)
 	})
 	return mux
 }

@@ -5,10 +5,11 @@ import (
     "context"
     "io"
     "log"
-    "os"
+    // "os"
     "sync"
     "sync/atomic"
     "time"
+    "errors"
 
     "github.com/Aadithya-J/alcaIDE/model"
     "github.com/docker/docker/api/types/container"
@@ -17,205 +18,274 @@ import (
 )
 
 const (
-    DefaultImage            = "docker.io/library/python:3.11-slim"
     ContainerStopTimeout    = 5 * time.Second
     ContainerCleanupTimeout = 10 * time.Second
 )
 
 type DockerManager struct {
     cli               *client.Client
-    containers        []*model.ContainerInfo
-    imageName         string
-    availablePool     chan *model.ContainerInfo
-    containerMap      map[string]*model.ContainerInfo
-    containerMapMutex sync.RWMutex
+    languageImages    map[string]string 
+    availablePools    map[string]chan *model.ContainerInfo
+    allContainers     map[string]*model.ContainerInfo
+    allContainersLock sync.RWMutex
+    poolsLock         sync.RWMutex
     shuttingDown      atomic.Bool
 }
 
-func NewManager(imageName string) (*DockerManager, error) {
+func NewManager(langImages map[string]string) (*DockerManager, error) {
     cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
     if err != nil {
         return nil, err
     }
-    if imageName == "" {
-        imageName = DefaultImage
+
+    if len(langImages) == 0 {
+        return nil, fmt.Errorf("No language images provided")
     }
+
     return &DockerManager{
-        cli:          cli,
-        containers:   []*model.ContainerInfo{},
-        imageName:    imageName,
-        containerMap: make(map[string]*model.ContainerInfo),
-        // shuttingDown defaults to false (zero value)
+        cli:            cli,
+        languageImages: langImages,
+        availablePools: make(map[string]chan *model.ContainerInfo),
+        allContainers:  make(map[string]*model.ContainerInfo),
     }, nil
 }
 
-func (m *DockerManager) PullImage(ctx context.Context) error {
-    log.Printf("Pulling Docker image: %s...", m.imageName)
-    reader, err := m.cli.ImagePull(ctx, m.imageName, image.PullOptions{})
-    if err != nil {
-        log.Printf("Failed to pull Docker image %s: %v", m.imageName, err)
-        return err
-    }
-    defer reader.Close()
-    //TODO : Consider using alternative for verbose output
-    if _, err := io.Copy(os.Stdout, reader); err != nil {
-        log.Printf("Warning: Failed to copy image pull output: %v", err)
-    }
-    log.Printf("Image %s pulled successfully or already exists.", m.imageName)
-    return nil
-}
-
-func (m *DockerManager) StartInitialContainers(ctx context.Context, count int) error {
-    log.Printf("Creating and starting %d initial containers...", count)
-    if count <= 0 {
-        return fmt.Errorf("Invalid number of containers to start: %d", count)
-    }
-
-    m.availablePool = make(chan *model.ContainerInfo, count)
-    m.containerMap = make(map[string]*model.ContainerInfo, count)
-
+func (m *DockerManager) PullImages(ctx context.Context) error {
     var wg sync.WaitGroup
-    var startMutex sync.Mutex
-    errChan := make(chan error, count)
+    errChan := make(chan error, len(m.languageImages))
 
-    for i := 0; i < count; i++ {
+    log.Printf("Pulling Docker images: %s...", m.languageImages)
+
+    for lang, imageName := range m.languageImages {
         wg.Add(1)
-        go func(containerIndex int) {
+        go func(l, img string) {
             defer wg.Done()
-            log.Printf("Creating container %d...", containerIndex)
-            resp, err := m.cli.ContainerCreate(ctx, &container.Config{
-                Image: m.imageName,
-                Cmd:   []string{"sleep", "infinity"},
-                Tty:   false,
-            }, nil, nil, nil, "")
+            log.Printf("Pulling image for %s: %s...", l, img)
 
+            reader, err := m.cli.ImagePull(ctx, img, image.PullOptions{})
             if err != nil {
-                errChan <- fmt.Errorf("failed to create container %d: %w", containerIndex, err)
-            }
-
-            containerID := resp.ID
-            err = m.cli.ContainerStart(ctx, containerID, container.StartOptions{})
-            if err != nil {
-                errChan <- fmt.Errorf("failed to start container %d: %w", containerIndex, err)
-                rmCtx, rmCancel := context.WithTimeout(context.Background(), ContainerCleanupTimeout)
-                defer rmCancel()
-                rmErr := m.cli.ContainerRemove(rmCtx, containerID, container.RemoveOptions{Force: true})
-                if rmErr != nil {
-                    log.Printf("Warning: Failed to remove unstartable container %s: %v", containerID, rmErr)
-                }
+                log.Printf("Failed to pull Docker image %s: %v", img, err)
+                errChan <- fmt.Errorf("failed to pull image %s: %w", img, err)
                 return
             }
+            defer reader.Close()
 
-            log.Printf("Started container %d: %s", containerIndex, containerID)
-            containInfo := &model.ContainerInfo{ID: containerID}
-            startMutex.Lock()
-            m.containers = append(m.containers, containInfo)
-            m.containerMap[containerID] = containInfo
-            startMutex.Unlock()
-
-            m.availablePool <- containInfo
-            log.Printf("Container %d added to available pool: %s", containerIndex, containerID)
-        }(i)
+            _, err = io.Copy(io.Discard, reader)
+            if err != nil {
+                log.Printf("Warning: Failed to copy image pull output for %s: %v", img, err)
+            }
+            log.Printf("Image %s pulled successfully or already exists.", img)
+        }(lang, imageName)
     }
-
     wg.Wait()
     close(errChan)
 
+    var pullErrors []error
+    for err := range errChan {
+        pullErrors = append(pullErrors, err)
+    }
+
+    if len(pullErrors) > 0 {
+        log.Printf("Warning: Some images failed to pull: %v", pullErrors)
+    } else {
+        log.Println("All images pulled successfully.")
+    }
+    return nil
+}
+
+func (m *DockerManager) StartInitialContainers(ctx context.Context, countPerLang int) error {
+    if countPerLang <= 0 {
+        return fmt.Errorf("invalid number of containers per language: %d", countPerLang)
+    }
+
+    log.Printf("Creating and starting %d initial containers *per language*...", countPerLang)
+
+    m.poolsLock.Lock()
+    for lang := range m.languageImages {
+        m.availablePools[lang] = make(chan *model.ContainerInfo, countPerLang)
+    }
+    m.poolsLock.Unlock()
+
+    var wg sync.WaitGroup
+    errChan := make(chan error, len(m.languageImages)*countPerLang)
+    totalContainersToStart := 0
+
+    for lang, imageName := range m.languageImages { 
+        log.Printf("starting ocontainers for %s using image %s", lang, imageName)
+        for i := 0; i < countPerLang; i++ {
+            totalContainersToStart++
+            wg.Add(1)
+            go func(lang, imageName string, containerIndex int) {
+
+                defer wg.Done()
+                log.Printf("Creating container %d for %s...", containerIndex, lang)
+
+                resp, err := m.cli.ContainerCreate(ctx, &container.Config{
+                    Image: imageName,
+                    Cmd:   []string{"sleep", "infinity"},
+                    Tty:   false,
+                }, nil, nil, nil, "")
+                if err != nil {
+                    errChan <- fmt.Errorf("failed to create container %d for %s: %w", containerIndex, lang, err)
+                    return
+                }
+                containerID := resp.ID
+                err = m.cli.ContainerStart(ctx, containerID, container.StartOptions{})
+                if err != nil {
+                    errChan <- fmt.Errorf("failed to start container %d for %s: %w", containerIndex, lang, err)
+                    rmCtx, rmCancel := context.WithTimeout(context.Background(), ContainerCleanupTimeout)
+                    defer rmCancel()
+                    rmErr := m.cli.ContainerRemove(rmCtx, containerID, container.RemoveOptions{Force: true})
+                    if rmErr != nil {
+                        log.Printf("Warning: Failed to remove unstartable container %s: %v", containerID, rmErr)
+                    }
+                    return 
+                }
+
+                log.Printf("Started container %d for %s: %s", containerIndex+1, lang, containerID)
+
+                containInfo := &model.ContainerInfo{ID: containerID}
+
+                m.allContainersLock.Lock()
+                m.allContainers[containerID] = containInfo
+                m.allContainersLock.Unlock()
+
+                m.poolsLock.Lock()
+                poolsChan, ok := m.availablePools[lang]
+                m.poolsLock.Unlock()
+                if ok {
+                    poolsChan <- containInfo
+                    log.Printf("Container %d for %s added to available pool: %s", containerIndex+1, lang, containerID)
+                } else {
+                    log.Printf("Warning: No pool found for language %s. Container %d not added to pool.", lang, containerIndex)
+                }
+            }(lang, imageName, i)
+        }
+    }
+    wg.Wait()
+    close(errChan)
     var startupErrors []error
     for err := range errChan {
         log.Printf("Error during container startup: %v", err)
         startupErrors = append(startupErrors, err)
     }
 
-    m.containerMapMutex.Lock()
-    numStarted := len(m.containers)
-    m.containerMapMutex.Unlock()
-
+    m.allContainersLock.RLock()
+    numStarted := len(m.allContainers)
+    m.allContainersLock.RUnlock()
     if numStarted == 0 {
         log.Fatal("Fatal: No containers were started successfully.")
     }
-
     if len(startupErrors) > 0 {
         log.Printf("Warning: Some containers failed to start: %v", startupErrors)
     }
+
     log.Printf("%d containers started successfully.", numStarted)
     return nil
 }
 
-func (m *DockerManager) AcquireContainer(ctx context.Context) (*model.ContainerInfo, error) {
+func (m *DockerManager) AcquireContainer(ctx context.Context, language string) (*model.ContainerInfo, error) {
+    m.poolsLock.RLock()
+    poolChan, ok := m.availablePools[language]
+    m.poolsLock.RUnlock()
+
+    if !ok {
+        return nil, fmt.Errorf("no container pool available for language: %s", language)
+    }
+
+    log.Printf("Attempting to acquire container for %s...", language)
     select {
-    case container := <-m.availablePool:
-        log.Printf("Container %s acquired.", container.ID)
+    case container := <-poolChan:
+        log.Printf("Container %s acquired for %s.", container.ID, language)
         return container, nil
     case <-ctx.Done():
-        log.Printf("Context cancelled while waiting for container: %v", ctx.Err())
-        return nil, fmt.Errorf("failed to acquire container: %w", ctx.Err())
+        log.Printf("Context cancelled while waiting for %s container: %v", language, ctx.Err())
+        return nil, fmt.Errorf("failed to acquire %s container: %w", language, ctx.Err())
     }
 }
 
-func (m *DockerManager) ReleaseContainer(container *model.ContainerInfo) {
+func (m *DockerManager) ReleaseContainer(container *model.ContainerInfo, language string) {
     if container == nil {
         log.Println("Warning: Attempted to release a nil container.")
         return
     }
 
-    // Check if shutdown is in progress BEFORE trying to send
     if m.shuttingDown.Load() {
-        log.Printf("Shutdown in progress. Not returning container %s to pool.", container.ID)
-        return 
+        log.Printf("Shutdown in progress. Not returning container %s (%s) to pool.", container.ID, language)
+        return
     }
 
-    log.Printf("Releasing container: %s", container.ID)
+    m.poolsLock.RLock()
+    poolChan, ok := m.availablePools[language]
+    m.poolsLock.RUnlock()
+
+    if !ok {
+        log.Printf("Warning: No pool found for language %s to release container %s.", language, container.ID)
+        return
+    }
+
+    log.Printf("Releasing container %s for %s", container.ID, language)
     select {
-    case m.availablePool <- container:
-        log.Printf("Container %s returned to pool.", container.ID)
+    case poolChan <- container:
+        log.Printf("Container %s returned to %s pool.", container.ID, language)
     default:
-        log.Printf("Warning: Could not return container %s to pool (pool might be full).", container.ID)
+        log.Printf("Warning: Could not return container %s to %s pool (pool might be full or closed).", container.ID, language)
     }
 }
 
 func (m *DockerManager) GetContainers() []*model.ContainerInfo {
-    m.containerMapMutex.RLock()
-    defer m.containerMapMutex.RUnlock()
+    m.allContainersLock.RLock()
+    defer m.allContainersLock.RUnlock()
 
-    listCopy := make([]*model.ContainerInfo, len(m.containers))
-    copy(listCopy, m.containers)
+    listCopy := make([]*model.ContainerInfo, 0, len(m.allContainers))
+    for _, c := range m.allContainers {
+        listCopy = append(listCopy, c)
+    }
     return listCopy
 }
 
+
 func (m *DockerManager) CleanupContainers() {
     m.shuttingDown.Store(true)
-    m.containerMapMutex.Lock()
-    defer m.containerMapMutex.Unlock()
 
-    if len(m.containers) == 0 {
+    m.poolsLock.Lock()
+    log.Println("Closing all language container pools...")
+    for lang, poolChan := range m.availablePools {
+        close(poolChan)
+        log.Printf("Closed pool for %s.", lang)
+    }
+
+    m.availablePools = make(map[string]chan *model.ContainerInfo)
+    m.poolsLock.Unlock()
+
+    m.allContainersLock.Lock()
+    defer m.allContainersLock.Unlock()
+
+    if len(m.allContainers) == 0 {
         log.Println("No containers managed by this manager to clean up.")
         return
     }
 
-    log.Println("Stopping and removing managed containers...")
-    close(m.availablePool) // Close the channel to prevent new acquisitions 
+    log.Printf("Stopping and removing %d managed containers...", len(m.allContainers))
 
-    log.Printf("Stopping and removing %d containers...", len(m.containers))
-
-    cleanupTimeout := ContainerCleanupTimeout + (time.Second * time.Duration(len(m.containers)))
-
+    cleanupTimeout := ContainerCleanupTimeout + (time.Second * time.Duration(len(m.allContainers)))
     cleanupCtx, cancelCleanup := context.WithTimeout(context.Background(), cleanupTimeout)
     defer cancelCleanup()
 
     var wg sync.WaitGroup
-    for _, c := range m.containers {
+    for id, c := range m.allContainers {
         wg.Add(1)
-        go func(c *model.ContainerInfo) {
+        go func(containerID string, contInfo *model.ContainerInfo) {
             defer wg.Done()
-            containerID := c.ID
             log.Printf("Stopping container %s...", containerID)
 
             stopTimeoutSecs := int(ContainerStopTimeout.Seconds())
             stopOpts := container.StopOptions{Timeout: &stopTimeoutSecs}
 
             if err := m.cli.ContainerStop(cleanupCtx, containerID, stopOpts); err != nil {
-                if cleanupCtx.Err() != nil {
+                if errors.Is(cleanupCtx.Err(), context.DeadlineExceeded) {
+                    log.Printf("Context deadline exceeded before stopping container %s.", containerID)
+                } else if cleanupCtx.Err() != nil {
                     log.Printf("Context cancelled before stopping container %s: %v", containerID, cleanupCtx.Err())
                 } else {
                     log.Printf("Error stopping container %s: %v. Attempting removal anyway.", containerID, err)
@@ -225,13 +295,15 @@ func (m *DockerManager) CleanupContainers() {
             }
 
             if cleanupCtx.Err() != nil {
-                log.Printf("Context cancelled before removing container %s.", containerID)
-                return // Don't attempt removal if context is done
+                log.Printf("Context done before removing container %s.", containerID)
+                return
             }
             log.Printf("Removing container %s...", containerID)
-            removeOpts := container.RemoveOptions{Force: true} // Force remove if stop failed or timed out
+            removeOpts := container.RemoveOptions{Force: true} // Force remove if stop failed/timed out
             if err := m.cli.ContainerRemove(cleanupCtx, containerID, removeOpts); err != nil {
-                if cleanupCtx.Err() != nil {
+                if errors.Is(cleanupCtx.Err(), context.DeadlineExceeded) {
+                    log.Printf("Context deadline exceeded during removal of container %s.", containerID)
+                } else if cleanupCtx.Err() != nil {
                     log.Printf("Context cancelled during removal of container %s: %v", containerID, cleanupCtx.Err())
                 } else {
                     log.Printf("Error removing container %s: %v", containerID, err)
@@ -239,7 +311,7 @@ func (m *DockerManager) CleanupContainers() {
             } else {
                 log.Printf("Container %s removed.", containerID)
             }
-        }(c)
+        }(id, c)
     }
     wg.Wait()
 
@@ -248,9 +320,7 @@ func (m *DockerManager) CleanupContainers() {
     } else {
         log.Println("Finished container cleanup.")
     }
-
-    m.containers = []*model.ContainerInfo{}
-    m.containerMap = make(map[string]*model.ContainerInfo)
+    m.allContainers = make(map[string]*model.ContainerInfo)
 }
 
 func (m *DockerManager) Close() {
